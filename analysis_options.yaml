@@ -1,0 +1,4 @@
+analyzer:
+  errors:
+    missing_return: error
+    dead_code: warning

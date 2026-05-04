@@ -1,0 +1,69 @@
+# Dependency directories
+.dart_tool/
+.pub-cache/
+.pub/
+build/
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+*.swp
+*.swo
+*.tmp
+*~
+
+# macOS files
+.DS_Store
+
+# Android files
+android/**/generated/
+android/app/src/main/res/drawable-*/
+android/app/src/main/res/mipmap-*/
+android/app/src/main/res/values/generated.xml
+android/.gradle/
+android/local.properties
+android/gen/
+android/bin/
+android/out/
+*.keystore
+*.jks
+
+# iOS files
+ios/.generated/
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/ServiceDefinitions.json
+ios/Runner/GeneratedPluginRegistrant.h
+ios/Runner/GeneratedPluginRegistrant.m
+ios/Pods/
+ios/.symlinks/
+ios/Config/
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+
+# Flutter specific
+pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# Model files (if any local downloads were committed by mistake)
+*.onnx
+*.npz
+*.json
+!voices-manifest.json
+!pubspec.yaml
+!analysis_options.yaml
+reference_repository/

@@ -1,0 +1,27 @@
+name: neural_tts
+description: On-device neural TTS engine for Flutter. Supports Kitten, Kokoro, Supertonic, and System OS TTS via native ONNX Runtime.
+version: 0.1.0
+publish_to: "none"
+
+environment:
+  sdk: ^3.11.0
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.0
+  path_provider: ^2.1.5
+  dio: ^5.9.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.localmind.neural_tts
+        pluginClass: NeuralTtsPlugin
