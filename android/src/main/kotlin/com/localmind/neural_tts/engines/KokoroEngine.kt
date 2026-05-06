@@ -97,45 +97,48 @@ class KokoroEngine : BaseEngine {
 
     private fun playAudio(audioBytes: ByteArray, rate: Float = 1.0f, pitch: Float = 1.0f, volume: Float = 1.0f) {
         val sampleRate = 24000
-        stop()
 
-        val minBufferSize = AudioTrack.getMinBufferSize(
-            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
+        if (audioTrack == null) {
+            val minBufferSize = AudioTrack.getMinBufferSize(
+                sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+            )
 
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(maxOf(minBufferSize, audioBytes.size))
-            .build()
+            audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(minBufferSize * 4, minBufferSize))
+                .build()
+
+            audioTrack?.play()
+        }
 
         audioTrack?.setVolume(volume)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            audioTrack?.playbackParams = audioTrack?.playbackParams?.setSpeed(rate)?.setPitch(pitch) ?: android.media.PlaybackParams().setSpeed(rate).setPitch(pitch)
+            try {
+                audioTrack?.playbackParams = audioTrack?.playbackParams?.setSpeed(rate)?.setPitch(pitch) ?: android.media.PlaybackParams().setSpeed(rate).setPitch(pitch)
+            } catch (e: Exception) {
+                // Ignore playback params exception if device doesn't support it
+            }
         }
 
         audioTrack?.write(audioBytes, 0, audioBytes.size)
-        audioTrack?.play()
     }
 
     private fun waitForPlayback() {
-        val track = audioTrack
-        if (track != null && track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-            while (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                Thread.sleep(50)
-            }
-        }
+        // AudioTrack in STREAM mode blocks on write if the internal buffer is full.
+        // It stays in PLAYSTATE_PLAYING until explicitly stopped.
+        // Do not spin-lock here.
     }
 
     private fun chunkText(text: String): List<String> {

@@ -83,8 +83,8 @@ class Phonemizer(private val dictPath: String? = null) {
      * Layered lookup cascade matching the reference implementation.
      */
     private fun phonemizeWord(word: String): String {
-        // Layer 1: Reduced forms (function-word shortcuts)
-        reducedForms[word]?.let { return it }
+        // Layer 1: Common words (function-word shortcuts and contractions)
+        commonWords[word]?.let { return it }
 
         // Layer 2: Dictionary lookup (en-us.bin, ~124K words)
         dict?.lookup(word)?.let { return it }
@@ -100,7 +100,16 @@ class Phonemizer(private val dictPath: String? = null) {
             }
         }
 
-        // Layer 4: Possessive fallback (word's → dict["word"] + "ɪz")
+        // Layer 4: Suffix stripping (matches Dart reference)
+        for (suffix in suffixes) {
+            if (word.length > suffix.first.length + 1 && word.endsWith(suffix.first)) {
+                val stem = word.substring(0, word.length - suffix.first.length)
+                // Call phonemizeWord instead of phonemizeCore so stem gets dict lookup
+                return phonemizeWord(stem) + suffix.second
+            }
+        }
+
+        // Layer 5: Possessive fallback (word's → dict["word"] + "ɪz")
         if (word.endsWith("'s") && word.length > 2) {
             val base = word.substring(0, word.length - 2)
             val baseIpa = phonemizeWord(base)
@@ -112,7 +121,7 @@ class Phonemizer(private val dictPath: String? = null) {
             if (baseIpa.isNotEmpty()) return baseIpa
         }
 
-        // Layer 5: G2P fallback (rule-based for OOV words)
+        // Layer 6: G2P fallback (rule-based for OOV words)
         return phonemizeCore(word)
     }
 
@@ -236,17 +245,92 @@ class Phonemizer(private val dictPath: String? = null) {
 
     companion object {
         /**
-         * Reduced forms — common function words with simplified pronunciations.
+         * Common words — function words, frequent vocabulary, and contractions with simplified pronunciations.
          * These take priority over dictionary lookups for consistency.
          */
-        private val reducedForms = mapOf(
-            "a" to "ɐ", "the" to "ðə", "to" to "tə", "of" to "ʌv",
-            "and" to "ən", "an" to "ən", "in" to "ɪn", "is" to "ɪz",
-            "it" to "ɪt", "for" to "fɚ", "on" to "ɑn", "at" to "æt",
-            "or" to "ɚ", "as" to "æz", "be" to "bi", "by" to "baɪ",
-            "he" to "hi", "we" to "wi", "me" to "mi", "do" to "də",
-            "my" to "maɪ", "so" to "soʊ", "no" to "noʊ", "up" to "ʌp",
-            "if" to "ɪf", "us" to "ʌs", "but" to "bʌt",
+        private val commonWords = mapOf(
+            "the" to "ðə", "a" to "ə", "an" to "æn",
+            "and" to "ænd", "or" to "ɔːɹ", "but" to "bʌt", "if" to "ɪf",
+            "of" to "ʌv", "to" to "tuː", "in" to "ɪn", "on" to "ɑn",
+            "at" to "æt", "by" to "baɪ", "as" to "æz",
+            "for" to "fɔːɹ", "with" to "wɪð", "from" to "fɹʌm", "into" to "ɪntuː",
+            "up" to "ʌp", "out" to "aʊt", "over" to "oʊvɚ", "than" to "ðæn",
+            "then" to "ðɛn", "so" to "soʊ", "yet" to "jɛt",
+            "i" to "aɪ", "you" to "juː", "he" to "hiː", "she" to "ʃiː",
+            "it" to "ɪt", "we" to "wiː", "they" to "ðeɪ",
+            "me" to "miː", "him" to "hɪm", "her" to "hɜːɹ", "us" to "ʌs",
+            "them" to "ðɛm", "my" to "maɪ", "your" to "jɔːɹ", "his" to "hɪz",
+            "its" to "ɪts", "our" to "aʊɚ", "their" to "ðɛɹ",
+            "this" to "ðɪs", "that" to "ðæt", "these" to "ðiːz", "those" to "ðoʊz",
+            "who" to "huː", "which" to "wɪtʃ", "what" to "wʌt", "where" to "wɛɹ",
+            "when" to "wɛn", "how" to "haʊ", "why" to "waɪ",
+            "is" to "ɪz", "are" to "ɑːɹ", "was" to "wɑz", "were" to "wɜːɹ",
+            "be" to "biː", "been" to "biːn", "being" to "biːɪŋ",
+            "have" to "hæv", "has" to "hæz", "had" to "hæd",
+            "do" to "duː", "does" to "dʌz", "did" to "dɪd", "done" to "dʌn",
+            "will" to "wɪl", "would" to "wʊd", "can" to "kæn", "could" to "kʊd",
+            "shall" to "ʃæl", "should" to "ʃʊd", "may" to "meɪ", "might" to "maɪt",
+            "must" to "mʌst", "need" to "niːd",
+            "get" to "ɡɛt", "got" to "ɡɑt", "go" to "ɡoʊ", "went" to "wɛnt",
+            "come" to "kʌm", "came" to "keɪm",
+            "make" to "meɪk", "made" to "meɪd",
+            "say" to "seɪ", "said" to "sɛd",
+            "know" to "noʊ", "think" to "θɪŋk", "see" to "siː",
+            "look" to "lʊk", "find" to "faɪnd", "give" to "ɡɪv", "use" to "juːz",
+            "tell" to "tɛl", "call" to "kɔːl", "keep" to "kiːp", "let" to "lɛt",
+            "seem" to "siːm", "feel" to "fiːl", "try" to "tɹaɪ", "leave" to "liːv",
+            "put" to "pʊt", "mean" to "miːn", "show" to "ʃoʊ",
+            "time" to "taɪm", "year" to "jɪɹ", "day" to "deɪ", "way" to "weɪ",
+            "man" to "mæn", "men" to "mɛn", "word" to "wɜːɹd",
+            "world" to "wɜːɹld", "life" to "laɪf", "hand" to "hænd",
+            "place" to "pleɪs", "case" to "keɪs", "thing" to "θɪŋ", "home" to "hoʊm",
+            "water" to "wɔːtɚ", "room" to "ɹuːm", "book" to "bʊk",
+            "eye" to "aɪ", "door" to "dɔːɹ", "face" to "feɪs", "name" to "neɪm",
+            "people" to "piːpəl", "child" to "tʃaɪld", "children" to "tʃɪldɹən",
+            "one" to "wʌn", "two" to "tuː", "three" to "θɹiː",
+            "not" to "nɑt", "all" to "ɔːl", "some" to "sʌm", "more" to "mɔːɹ",
+            "very" to "vɛɹiː", "just" to "dʒʌst", "also" to "ɔːlsoʊ",
+            "even" to "iːvən", "well" to "wɛl", "such" to "sʌtʃ", "only" to "oʊnliː",
+            "any" to "ɛniː", "many" to "mɛniː", "each" to "iːtʃ", "long" to "lɔːŋ",
+            "down" to "daʊn", "first" to "fɜːɹst", "other" to "ʌðɚ", "about" to "əbaʊt",
+            "hello" to "hɛloʊ", "hi" to "haɪ", "hey" to "heɪ",
+            "bye" to "baɪ", "goodbye" to "ɡʊdbaɪ",
+            "yes" to "jɛs", "no" to "noʊ", "okay" to "oʊkeɪ", "ok" to "oʊkeɪ",
+            "please" to "pliːz", "thanks" to "θæŋks", "thank" to "θæŋk",
+            "sorry" to "sɑɹiː", "am" to "æm",
+            "i'm" to "aɪm", "you're" to "jʊɹ", "he's" to "hiːz", "she's" to "ʃiːz",
+            "it's" to "ɪts", "we're" to "wɪɹ", "they're" to "ðɛɹ",
+            "i've" to "aɪv", "you've" to "juːv", "we've" to "wiːv", "they've" to "ðeɪv",
+            "i'll" to "aɪl", "you'll" to "juːl", "he'll" to "hiːl", "she'll" to "ʃiːl",
+            "we'll" to "wiːl", "they'll" to "ðeɪl",
+            "i'd" to "aɪd", "you'd" to "juːd", "he'd" to "hiːd", "she'd" to "ʃiːd",
+            "we'd" to "wiːd", "they'd" to "ðeɪd",
+            "isn't" to "ɪzənt", "aren't" to "ɑːɹnt",
+            "wasn't" to "wʌzənt", "weren't" to "wɜːɹnt",
+            "haven't" to "hævənt", "hasn't" to "hæzənt", "hadn't" to "hædənt",
+            "won't" to "woʊnt", "wouldn't" to "wʊdənt",
+            "don't" to "doʊnt", "doesn't" to "dʌzənt", "didn't" to "dɪdənt",
+            "can't" to "kænt", "couldn't" to "kʊdənt",
+            "shouldn't" to "ʃʊdənt", "mightn't" to "maɪtənt", "mustn't" to "mʌstənt"
+        )
+
+        private val suffixes = listOf(
+            "tion" to "ʃən", "sion" to "ʒən",
+            "ture" to "ʧɚ", "ness" to "nɪs",
+            "ment" to "mənt", "able" to "əbəl",
+            "ible" to "ɪbəl", "ical" to "ɪkəl",
+            "ious" to "iəs", "ance" to "əns",
+            "ence" to "əns", "ism" to "ɪzəm",
+            "ity" to "ɪti", "ise" to "aɪz",
+            "ize" to "aɪz", "ive" to "ɪv",
+            "ous" to "əs", "ful" to "fəl",
+            "ing" to "ɪŋ", "est" to "ɪst",
+            "ist" to "ɪst", "ant" to "ənt",
+            "ent" to "ənt", "age" to "ɪʤ",
+            "less" to "lɪs", "ify" to "ɪfaɪ",
+            "fy" to "faɪ", "ly" to "liː",
+            "er" to "ɚ", "ed" to "d",
+            "s" to "z"
         )
 
         private val validChars = setOf(
