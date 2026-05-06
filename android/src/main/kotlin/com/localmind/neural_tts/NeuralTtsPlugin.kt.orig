@@ -100,7 +100,6 @@ class NeuralTtsPlugin : FlutterPlugin, MethodCallHandler {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    android.util.Log.e("NeuralTtsPlugin", "TTS Error", e)
                     result.error("TTS_ERROR", e.message ?: "Unknown error", null)
                 }
             }
