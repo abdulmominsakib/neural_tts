@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'streaming_handle.dart';
+import 'phonemizer.dart';
 
 enum EngineId { kitten, kokoro, supertonic, system }
 
@@ -130,6 +131,7 @@ abstract class Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   });
 
   StreamingHandle playStreaming(
@@ -139,9 +141,12 @@ abstract class Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   });
 
   Future<void> stop();
 
   Future<void> release();
+
+  void setPhonemizer(Phonemizer phonemizer);
 }

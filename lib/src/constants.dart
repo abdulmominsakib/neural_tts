@@ -8,7 +8,10 @@ const kittenModelSubdir = 'tts/kitten';
 const kokoroModelSubdir = 'tts/kokoro';
 const supertonicModelSubdir = 'tts/supertonic';
 
-const ttsDictUrl = 'https://huggingface.co/datasets/palshub/phonemizer-dicts/resolve/main/en-us.bin';
+const ttsDictUrl =
+    'https://huggingface.co/datasets/palshub/phonemizer-dicts/resolve/main/en-us.bin';
+const espeakDataUrl =
+    'https://huggingface.co/datasets/palshub/phonemizer-dicts/resolve/main/espeak-ng-data.zip';
 
 const kittenModelBaseUrl =
     'https://huggingface.co/palshub/kitten-tts-nano-0.8-fp32/resolve/main';
@@ -18,7 +21,7 @@ const kokoroModelBaseUrl =
 const kokoroVoicesBaseUrl = '$kokoroModelBaseUrl/voices';
 
 const supertonicModelBaseUrl =
-    'https://huggingface.co/Supertone/supertonic-2/resolve/main';
+    'https://huggingface.co/Supertone/supertonic-3/resolve/main';
 const supertonicVoicesBaseUrl = '$supertonicModelBaseUrl/voice_styles';
 
 // NOTE: palshub/tts-manifests is a private HuggingFace repo (returns 401).
@@ -28,7 +31,7 @@ const supertonicVoicesBaseUrl = '$supertonicModelBaseUrl/voice_styles';
 
 const maxChunkSize = 200;
 const streamTargetChars = 300;
-const supertonicStepsDefault = 3;
+const supertonicStepsDefault = 20;
 const supertonicStepsOptions = [1, 2, 3, 5, 10, 20];
 
 const maxRetries = 3;

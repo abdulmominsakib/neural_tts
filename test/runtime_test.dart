@@ -58,6 +58,7 @@ class _TestEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) async {}
 
   @override
@@ -68,6 +69,7 @@ class _TestEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) {
     throw UnimplementedError();
   }
@@ -77,4 +79,7 @@ class _TestEngine extends Engine {
 
   @override
   Future<void> release() async => loaded = false;
+
+  @override
+  void setPhonemizer(Phonemizer phonemizer) {}
 }

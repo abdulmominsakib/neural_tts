@@ -41,7 +41,8 @@ class KittenEngine : BaseEngine {
         val pitch = (args["pitch"] as? Double) ?: 1.0
         val volume = (args["volume"] as? Double) ?: 1.0
 
-        val phonemized = phonemizer.convert(text)
+        val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+        val phonemized = if (isPhonemized) text else phonemizer.convert(text)
         val chunks = chunkText(phonemized)
 
         for (chunk in chunks) {
@@ -67,7 +68,8 @@ class KittenEngine : BaseEngine {
             streamBuffer.clear()
             streamBuffer.append(sentences.last())
 
-            val phonemized = phonemizer.convert(complete)
+            val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+            val phonemized = if (isPhonemized) complete else phonemizer.convert(complete)
             val wavBytes = session?.synthesize(phonemized, voiceId, rate)
             if (wavBytes != null) {
                 playWavBytes(wavBytes)
@@ -81,7 +83,8 @@ class KittenEngine : BaseEngine {
         if (streamBuffer.isNotEmpty()) {
             val text = streamBuffer.toString()
             streamBuffer.clear()
-            val phonemized = phonemizer.convert(text)
+            val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+            val phonemized = if (isPhonemized) text else phonemizer.convert(text)
             val wavBytes = session?.synthesize(phonemized, voiceId, rate)
             if (wavBytes != null) {
                 playWavBytes(wavBytes)

@@ -1,14 +1,24 @@
 import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
 import '../engine.dart';
 import '../constants.dart';
 import '../streaming_handle.dart';
-import '../platform/tts_platform.dart';
-import '../download/models.dart';
 import '../download/downloader.dart';
+import '../download/models.dart';
+import '../phonemizer.dart';
+import '../wav_utils.dart';
+import 'supertonic_inference.dart';
 
 class SupertonicEngine extends Engine {
   final ModelDownloader _downloader = ModelDownloader();
+  SupertonicInference? _inference;
+  final AudioPlayer _audioPlayer = AudioPlayer();
   bool _loaded = false;
+
+  @override
+  void setPhonemizer(Phonemizer phonemizer) {
+    // Supertonic doesn't currently use a Dart-side phonemizer.
+  }
 
   @override
   EngineId get id => EngineId.supertonic;
@@ -37,19 +47,17 @@ class SupertonicEngine extends Engine {
   Future<void> load() async {
     if (_loaded) return;
     final engineDir = await _downloader.getEngineDir(EngineId.supertonic);
-    await TtsPlatform.instance.initialize({
-      'engine': 'supertonic',
-      'durationPredictorPath': '${engineDir.path}/duration_predictor.onnx',
-      'textEncoderPath': '${engineDir.path}/text_encoder.onnx',
-      'vectorEstimatorPath': '${engineDir.path}/vector_estimator.onnx',
-      'vocoderPath': '${engineDir.path}/vocoder.onnx',
-      'unicodeIndexerPath': '${engineDir.path}/unicode_indexer.json',
-      'voicesDir': '${engineDir.path}/voices',
-      'executionProviders': 'cpu',
-      'maxChunkSize': maxChunkSize,
-      'silentMode': 'obey',
-      'ducking': true,
-    });
+    
+    _inference = SupertonicInference(
+      durationPredictorPath: '${engineDir.path}/duration_predictor.onnx',
+      textEncoderPath: '${engineDir.path}/text_encoder.onnx',
+      vectorEstimatorPath: '${engineDir.path}/vector_estimator.onnx',
+      vocoderPath: '${engineDir.path}/vocoder.onnx',
+      unicodeIndexerPath: '${engineDir.path}/unicode_indexer.json',
+      voicesDir: '${engineDir.path}/voices',
+    );
+    
+    await _inference!.initialize();
     _loaded = true;
   }
 
@@ -62,18 +70,23 @@ class SupertonicEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) async {
     if (!_loaded) await load();
-    await TtsPlatform.instance.speak({
-      'engine': 'supertonic',
-      'text': text,
-      'voiceId': voice.id,
-      'language': language ?? 'en',
-      'inferenceSteps': inferenceSteps ?? supertonicStepsDefault,
-      'rate': rate,
-      'pitch': pitch,
-      'volume': volume,
-    });
+    
+    final pcmBytes = await _inference!.synthesize(
+      text, 
+      voice.id, 
+      language ?? 'en', 
+      inferenceSteps ?? supertonicStepsDefault
+    );
+    
+    final wavBytes = WavUtils.addWavHeader(pcmBytes, 24000, 1, 16);
+    
+    await _audioPlayer.stop();
+    await _audioPlayer.setPlaybackRate(rate);
+    await _audioPlayer.setVolume(volume);
+    await _audioPlayer.play(BytesSource(wavBytes));
   }
 
   @override
@@ -84,13 +97,15 @@ class SupertonicEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) {
-    final streamId = 'supertonic.${voice.id}.${DateTime.now().millisecondsSinceEpoch}';
+    // Supertonic's current implementation doesn't support true streaming due to the denoising loop.
+    // We return a handle that just buffers text and plays it when finalized, or we could chunk it.
     return _SupertonicStreamingHandle(
-      streamId: streamId,
-      voiceId: voice.id,
-      language: language ?? 'en',
-      inferenceSteps: inferenceSteps ?? supertonicStepsDefault,
+      engine: this,
+      voice: voice,
+      language: language,
+      inferenceSteps: inferenceSteps,
       rate: rate,
       pitch: pitch,
       volume: volume,
@@ -99,33 +114,36 @@ class SupertonicEngine extends Engine {
 
   @override
   Future<void> stop() async {
-    await TtsPlatform.instance.stop();
+    await _audioPlayer.stop();
   }
 
   @override
   Future<void> release() async {
     if (_loaded) {
-      await TtsPlatform.instance.release();
+      _inference?.close();
+      _inference = null;
       _loaded = false;
     }
   }
 }
 
 class _SupertonicStreamingHandle implements StreamingHandle {
-  final String streamId;
-  final String voiceId;
-  final String language;
-  final int inferenceSteps;
+  final SupertonicEngine engine;
+  final Voice voice;
+  final String? language;
+  final int? inferenceSteps;
   final double rate;
   final double pitch;
   final double volume;
+  
+  final StringBuffer _buffer = StringBuffer();
   bool _active = false;
 
   _SupertonicStreamingHandle({
-    required this.streamId,
-    required this.voiceId,
-    required this.language,
-    required this.inferenceSteps,
+    required this.engine,
+    required this.voice,
+    this.language,
+    this.inferenceSteps,
     required this.rate,
     required this.pitch,
     required this.volume,
@@ -134,29 +152,31 @@ class _SupertonicStreamingHandle implements StreamingHandle {
   @override
   void appendText(String chunk) {
     _active = true;
-    TtsPlatform.instance.streamAppend({
-      'engine': 'supertonic',
-      'streamId': streamId,
-      'text': chunk,
-      'voiceId': voiceId,
-      'language': language,
-      'inferenceSteps': inferenceSteps,
-      'rate': rate,
-      'pitch': pitch,
-      'volume': volume,
-    });
+    _buffer.write(chunk);
   }
 
   @override
   Future<void> finalize() async {
     _active = false;
-    await TtsPlatform.instance.streamFinalize({'streamId': streamId});
+    if (_buffer.isNotEmpty) {
+      await engine.play(
+        _buffer.toString(),
+        voice,
+        language: language,
+        inferenceSteps: inferenceSteps,
+        rate: rate,
+        pitch: pitch,
+        volume: volume,
+      );
+      _buffer.clear();
+    }
   }
 
   @override
   Future<void> cancel() async {
     _active = false;
-    await TtsPlatform.instance.streamCancel({'streamId': streamId});
+    _buffer.clear();
+    await engine.stop();
   }
 
   @override

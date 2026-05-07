@@ -11,6 +11,7 @@ A high-performance, on-device neural Text-to-Speech (TTS) engine for Flutter. Po
 - 🚀 **Multiple Neural Engines**: Choose the perfect balance between speed, quality, and size.
 - 📱 **Android Support**: Currently optimized and supported exclusively for Android devices.
 - ⚡ **Native Performance**: Leverages ONNX Runtime with platform-specific optimizations.
+- 🗣️ **Multilingual IPA**: Integrated Espeak-NG for accurate phonemization in 100+ languages.
 - 🧠 **AI-Ready**: Built-in `ThinkingStripper` to handle LLM reasoning blocks (`<think>`) automatically.
 - 🎙️ **Rich Voice Library**: Support for dozens of expressive voices across multiple languages and accents.
 - 🎚️ **Granular Control**: Adjust rate, pitch, volume, and engine-specific parameters.
@@ -110,6 +111,48 @@ if (result.hadReasoning) {
 
 await engine.play(result.text, myVoice);
 ```
+
+### 🧠 Phonemization (Espeak-NG)
+
+For improved IPA accuracy and support for 100+ languages, `neural_tts` integrates **Espeak-NG**. This provides state-of-the-art text-to-phoneme conversion, ensuring natural pronunciation across diverse linguistic rules.
+
+#### 1. Compile Linguistic Data
+Run the included helper script to compile binary phoneme data for your target languages. The script will automatically compress the data into a ZIP archive:
+```bash
+# Compiles English (US), Spanish, and French
+dart run neural_tts:compile_espeak_data --languages=en-us,es,fr
+```
+This generates an `espeak-data/espeak-ng-data.zip` file. You can host this file on your own server or use the default provided URL.
+
+#### 2. Runtime Download (Recommended)
+`neural_tts` is designed to download and extract linguistic data at runtime, similar to how it handles ONNX models. This keeps your initial app size small.
+
+The `ModelDownloader` will automatically fetch the data if it's missing when you download an engine:
+```dart
+final downloader = ModelDownloader();
+final stream = downloader.downloadEngineFiles(EngineId.kokoro);
+// ... espeak-ng-data.zip will be downloaded and extracted automatically
+```
+
+#### 3. Initialization
+Once downloaded, initialize the phonemizer by pointing it to the TTS directory:
+```dart
+final downloader = ModelDownloader();
+final ttsDir = await downloader.getTtsDir();
+final status = await engine.checkStatus();
+
+if (status.isInstalled) {
+  final espeakPhonemizer = EspeakPhonemizer(
+    dataPath: ttsDir.path,
+    language: 'en-us',
+  );
+  
+  engine.setPhonemizer(espeakPhonemizer);
+}
+```
+Once set, the engine will use Espeak-NG for high-fidelity IPA generation during all playback calls.
+
+---
 
 ### Advanced Controls
 

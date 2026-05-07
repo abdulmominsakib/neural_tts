@@ -35,7 +35,8 @@ class KokoroEngine : BaseEngine {
         val pitch = (args["pitch"] as? Double) ?: 1.0
         val volume = (args["volume"] as? Double) ?: 1.0
 
-        val phonemized = phonemizer.convert(text)
+        val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+        val phonemized = if (isPhonemized) text else phonemizer.convert(text)
         val chunks = chunkText(phonemized)
 
         for (chunk in chunks) {
@@ -60,7 +61,8 @@ class KokoroEngine : BaseEngine {
             val complete = sentences.dropLast(1).joinToString("")
             streamBuffer.clear()
             streamBuffer.append(sentences.last())
-            val phonemized = phonemizer.convert(complete)
+            val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+            val phonemized = if (isPhonemized) complete else phonemizer.convert(complete)
             val audioBytes = session?.synthesize(phonemized, voiceId)
             if (audioBytes != null) playAudio(audioBytes)
         }
@@ -71,7 +73,8 @@ class KokoroEngine : BaseEngine {
         if (streamBuffer.isNotEmpty()) {
             val text = streamBuffer.toString()
             streamBuffer.clear()
-            val phonemized = phonemizer.convert(text)
+            val isPhonemized = (args["isPhonemized"] as? Boolean) ?: false
+            val phonemized = if (isPhonemized) text else phonemizer.convert(text)
             val audioBytes = session?.synthesize(phonemized, voiceId)
             if (audioBytes != null) playAudio(audioBytes)
         }

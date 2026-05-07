@@ -1,9 +1,15 @@
 import 'dart:async';
 import '../engine.dart';
 import '../streaming_handle.dart';
+import '../phonemizer.dart';
 import '../platform/tts_platform.dart';
 
 class SystemEngine extends Engine {
+  @override
+  void setPhonemizer(Phonemizer phonemizer) {
+    // System engine uses OS-native phonemization.
+  }
+
   @override
   EngineId get id => EngineId.system;
 
@@ -40,6 +46,7 @@ class SystemEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) async {
     await TtsPlatform.instance.speak({
       'text': text,
@@ -59,6 +66,7 @@ class SystemEngine extends Engine {
     double rate = 1.0,
     double pitch = 1.0,
     double volume = 1.0,
+    bool phonemize = true,
   }) {
     throw UnsupportedError('System engine does not support streaming');
   }
