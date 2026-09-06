@@ -6,6 +6,7 @@ import ai.onnxruntime.OrtSession
 object OnnxRuntimeHolder {
     private var environment: OrtEnvironment? = null
 
+    @Synchronized
     fun getEnvironment(): OrtEnvironment {
         if (environment == null) {
             environment = OrtEnvironment.getEnvironment()
@@ -15,9 +16,10 @@ object OnnxRuntimeHolder {
 
     fun createSession(modelPath: String): OrtSession {
         val env = getEnvironment()
-        val sessionOptions = OrtSession.SessionOptions()
-        sessionOptions.addCPU(true)
-        return env.createSession(modelPath, sessionOptions)
+        return OrtSession.SessionOptions().use { options ->
+            options.addCPU(true)
+            env.createSession(modelPath, options)
+        }
     }
 
     fun close() {

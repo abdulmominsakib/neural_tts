@@ -6,7 +6,8 @@ import 'tts_platform.dart';
 class TtsMethodChannel extends TtsPlatform {
   final MethodChannel _channel;
 
-  TtsMethodChannel() : _channel = const MethodChannel('com.localmind.neural_tts');
+  TtsMethodChannel()
+    : _channel = const MethodChannel('com.localmind.neural_tts');
 
   @override
   Future<void> initialize(Map<String, dynamic> args) async {
@@ -53,6 +54,8 @@ class TtsMethodChannel extends TtsPlatform {
         id: map['id'] as String,
         name: map['name'] as String,
         engine: EngineId.system,
+        language: map['language'] as String?,
+        gender: map['gender'] as String?,
       );
     }).toList();
   }

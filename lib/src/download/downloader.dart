@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive.dart';
 
@@ -11,10 +10,27 @@ import '../engine.dart';
 import 'models.dart';
 
 class ModelDownloader {
-  final Dio _dio = Dio();
+  final Dio _dio;
+  final Future<Directory> Function()? _directoryProvider;
+  final String _espeakArchiveUrl;
+  ModelDownloader({
+    Dio? dio,
+    Future<Directory> Function()? directoryProvider,
+    String espeakArchiveUrl = espeakDataUrl,
+  }) : _dio =
+           dio ??
+           Dio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 30),
+               receiveTimeout: const Duration(seconds: 60),
+             ),
+           ),
+       _directoryProvider = directoryProvider,
+       _espeakArchiveUrl = espeakArchiveUrl;
   final Map<String, CancelToken> _activeDownloads = {};
 
   Future<Directory> getTtsDir() async {
+    if (_directoryProvider != null) return _directoryProvider();
     final supportDir = await getApplicationSupportDirectory();
     final dir = Directory('${supportDir.path}/$ttsParentSubdir');
     if (!await dir.exists()) {
@@ -54,7 +70,7 @@ class ModelDownloader {
     for (final file in files) {
       if (file.fileName == 'espeak-ng-data.zip') {
         // Check if the extracted directory exists
-        if (!await Directory('${ttsDir.path}/espeak-ng-data').exists()) {
+        if (!await File('${ttsDir.path}/espeak-ng-data/.complete').exists()) {
           return false;
         }
         continue;
@@ -64,7 +80,7 @@ class ModelDownloader {
       final path = isDictFile
           ? '${ttsDir.path}/${file.fileName}'
           : '${dir.path}/${file.fileName}';
-      if (!await File(path).exists()) {
+      if (!await File(path).exists() || await File(path).length() == 0) {
         return false;
       }
     }
@@ -81,9 +97,9 @@ class ModelDownloader {
             downloadUrl: ttsDictUrl,
             sizeBytes: 15 * 1024 * 1024,
           ),
-          const ModelFile(
+          ModelFile(
             fileName: 'espeak-ng-data.zip',
-            downloadUrl: espeakDataUrl,
+            downloadUrl: _espeakArchiveUrl,
             sizeBytes: 3 * 1024 * 1024,
           ),
         ];
@@ -95,9 +111,9 @@ class ModelDownloader {
             downloadUrl: ttsDictUrl,
             sizeBytes: 15 * 1024 * 1024,
           ),
-          const ModelFile(
+          ModelFile(
             fileName: 'espeak-ng-data.zip',
-            downloadUrl: espeakDataUrl,
+            downloadUrl: _espeakArchiveUrl,
             sizeBytes: 3 * 1024 * 1024,
           ),
         ];
@@ -312,271 +328,239 @@ class ModelDownloader {
     ),
   ];
 
+  static Future<void> _writeTail = Future.value();
+
   Stream<FileProgress> downloadEngineFiles(EngineId engine) async* {
-    final engineId = engine.name;
-    final dir = await getEngineDir(engine);
-    final ttsDir = await getTtsDir();
-    final files = _coreFiles(engine);
-
-    debugPrint('[Downloader] Starting download for engine=$engineId');
-    debugPrint('[Downloader] Engine dir: ${dir.path}');
-    debugPrint('[Downloader] TTS dir:    ${ttsDir.path}');
-    debugPrint(
-      '[Downloader] Files to download: ${files.map((f) => f.fileName).join(', ')}',
-    );
-
-    for (final file in files) {
-      final cancelToken = CancelToken();
-      _activeDownloads[engineId] = cancelToken;
-
-      final isDictFile = file.fileName == 'en-us.bin';
-      final filePath = isDictFile
-          ? '${ttsDir.path}/${file.fileName}'
-          : '${dir.path}/${file.fileName}';
-      final partialPath = '$filePath.part';
-      final partialFile = File(partialPath);
-
-      // Ensure parent directories exist (needed for nested paths like onnx/, voices/)
-      final parentDir = File(filePath).parent;
-      if (!await parentDir.exists()) {
-        await parentDir.create(recursive: true);
-      }
-
-      final finalFile = File(filePath);
-      if (await finalFile.exists()) {
-        debugPrint(
-          '[Downloader] SKIP ${file.fileName} — already exists at $filePath',
-        );
-        yield FileProgress(
-          fileName: file.fileName,
-          receivedBytes: await finalFile.length(),
-          totalBytes: await finalFile.length(),
-          isComplete: true,
-        );
-        continue;
-      }
-
-      int receivedBytes = 0;
-      if (await partialFile.exists()) {
-        receivedBytes = await partialFile.length();
-        debugPrint(
-          '[Downloader] Partial file found: $partialPath (${receivedBytes} bytes)',
-        );
-      } else {
-        debugPrint(
-          '[Downloader] No partial file, starting fresh: $partialPath',
-        );
-      }
-
-      debugPrint(
-        '[Downloader] Downloading ${file.fileName} from ${file.downloadUrl}',
-      );
-
-      try {
-        ResolveResult resolved;
-        try {
-          resolved = await _resolveWithRedirects(
-            url: file.downloadUrl,
-            startByte: receivedBytes,
-            cancelToken: cancelToken,
-          );
-        } on DioException catch (e) {
-          // HuggingFace redirects to pre-signed CDN URLs whose AWS signature
-          // does NOT cover the Range header. Sending Range to the CDN causes
-          // a signature mismatch → 401. Retry from scratch without Range.
-          debugPrint(
-            '[Downloader] ERROR resolving ${file.fileName}: status=${e.response?.statusCode} receivedBytes=$receivedBytes',
-          );
-          debugPrint('[Downloader]   DioException type: ${e.type}');
-          debugPrint('[Downloader]   DioException message: ${e.message}');
-          debugPrint('[Downloader]   Response headers: ${e.response?.headers}');
-          if (receivedBytes > 0 && e.response?.statusCode == 401) {
-            debugPrint(
-              '[Downloader] 401 on resume — deleting partial and retrying from scratch',
-            );
-            if (await partialFile.exists()) {
-              await partialFile.delete();
-            }
-            receivedBytes = 0;
-            resolved = await _resolveWithRedirects(
-              url: file.downloadUrl,
-              startByte: 0,
-              cancelToken: cancelToken,
-            );
-          } else {
-            rethrow;
-          }
+    if (_activeDownloads.containsKey(engine.name)) {
+      throw StateError('Download already active for ${engine.name}');
+    }
+    final token = CancelToken();
+    _activeDownloads[engine.name] = token;
+    final previous = _writeTail;
+    final finished = Completer<void>();
+    _writeTail = finished.future;
+    try {
+      await previous;
+      if (token.isCancelled) throw token.cancelError!;
+      final dir = await getEngineDir(engine);
+      final root = await getTtsDir();
+      for (final file in _coreFiles(engine)) {
+        if (token.isCancelled) throw token.cancelError!;
+        if (file.fileName == 'espeak-ng-data.zip' &&
+            await File('${root.path}/espeak-ng-data/.complete').exists()) {
+          yield FileProgress(fileName: file.fileName, isComplete: true);
+          continue;
         }
-
-        final response = resolved.response;
-        debugPrint(
-          '[Downloader] Got stream response for ${file.fileName} | status=${response.statusCode} | crossedHost=${resolved.crossedHost}',
-        );
-        debugPrint(
-          '[Downloader]   Content-Length header: ${response.headers.value(Headers.contentLengthHeader)}',
-        );
-        debugPrint(
-          '[Downloader]   Final URL host: ${response.requestOptions.uri.host}',
-        );
-
-        final contentLength = response.headers.value(
-          Headers.contentLengthHeader,
-        );
-        final totalBytes = contentLength != null
-            ? int.parse(contentLength) + receivedBytes
-            : file.sizeBytes;
-        debugPrint(
-          '[Downloader]   totalBytes=$totalBytes (receivedBytes=$receivedBytes)',
-        );
-
-        final writeMode = receivedBytes > 0 ? FileMode.append : FileMode.write;
-        debugPrint(
-          '[Downloader]   Opening sink in mode=${writeMode == FileMode.append ? 'append' : 'write'}: $partialPath',
-        );
-        final sink = partialFile.openWrite(mode: writeMode);
-        final stream = response.data?.stream;
-
-        if (stream == null) {
-          await sink.close();
-          debugPrint(
-            '[Downloader] ERROR: response data stream is null for ${file.fileName}',
-          );
-          throw DioException(
-            requestOptions: response.requestOptions,
-            error: 'Response data stream is null',
-          );
+        final path = file.fileName == 'en-us.bin'
+            ? '${root.path}/${file.fileName}'
+            : '${dir.path}/${file.fileName}';
+        await for (final progress in _download(file, path, token)) {
+          if (!progress.isComplete) yield progress;
         }
-
-        DateTime lastProgressUpdate = DateTime.now();
-        int chunkCount = 0;
-
-        try {
-          await for (final chunk in stream) {
-            if (cancelToken.isCancelled) {
-              debugPrint(
-                '[Downloader] Cancelled during stream for ${file.fileName}',
-              );
-              break;
-            }
-            sink.add(chunk);
-            receivedBytes += chunk.length;
-            chunkCount++;
-
-            final now = DateTime.now();
-            if (now.difference(lastProgressUpdate).inMilliseconds >= 500) {
-              debugPrint(
-                '[Downloader]   Progress ${file.fileName}: $receivedBytes / $totalBytes bytes (chunk #$chunkCount)',
-              );
-              yield FileProgress(
-                fileName: file.fileName,
-                receivedBytes: receivedBytes,
-                totalBytes: totalBytes,
-              );
-              lastProgressUpdate = now;
-            }
-          }
-        } catch (streamError, st) {
-          debugPrint(
-            '[Downloader] ERROR reading stream for ${file.fileName}: $streamError',
-          );
-          debugPrint('[Downloader]   Stack: $st');
-          await sink.close();
-          rethrow;
-        }
-
-        debugPrint(
-          '[Downloader] Stream complete for ${file.fileName}. Flushing sink...',
-        );
-        await sink.flush();
-        await sink.close();
-        debugPrint('[Downloader] Renaming $partialPath → $filePath');
-        await partialFile.rename(filePath);
-        debugPrint(
-          '[Downloader] DONE ${file.fileName} | total=$receivedBytes bytes',
-        );
-
-        yield FileProgress(
-          fileName: file.fileName,
-          receivedBytes: receivedBytes,
-          totalBytes: receivedBytes,
-          isComplete: true,
-        );
-
+        if (token.isCancelled) throw token.cancelError!;
         if (file.fileName == 'espeak-ng-data.zip') {
-          debugPrint('[Downloader] Unzipping espeak-ng-data.zip...');
-          await _unzipEspeakData(filePath, ttsDir.path);
-          debugPrint('[Downloader] Unzip complete.');
+          await _unzipEspeakData(path, root.path, token);
         }
-      } catch (e, st) {
-        if (e is DioException && CancelToken.isCancel(e)) {
-          debugPrint('[Downloader] Download cancelled for ${file.fileName}');
-          return;
+        if (token.isCancelled) throw token.cancelError!;
+        final length = await File(path).length();
+        yield FileProgress(
+          fileName: file.fileName,
+          receivedBytes: length,
+          totalBytes: length,
+          isComplete: true,
+        );
+      }
+    } on DioException catch (error) {
+      if (!CancelToken.isCancel(error)) rethrow;
+    } finally {
+      token.cancel();
+      if (identical(_activeDownloads[engine.name], token)) {
+        _activeDownloads.remove(engine.name);
+      }
+      finished.complete();
+    }
+  }
+
+  Stream<FileProgress> _download(
+    ModelFile file,
+    String path,
+    CancelToken token,
+  ) async* {
+    final target = File(path);
+    await target.parent.create(recursive: true);
+    if (await target.exists() && await target.length() > 0) return;
+    final partial = File('$path.part');
+    var offset = await partial.exists() ? await partial.length() : 0;
+    Response<ResponseBody>? response;
+    int? expected;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        response = (await _resolveWithRedirects(
+          url: file.downloadUrl,
+          startByte: offset,
+          cancelToken: token,
+        )).response;
+        if (response.statusCode == 200) {
+          offset =
+              0; // Range ignored, including redirects that return a full file.
+          expected = int.tryParse(
+            response.headers.value(Headers.contentLengthHeader) ?? '',
+          );
+          break;
         }
-        debugPrint('[Downloader] FATAL ERROR for ${file.fileName}: $e');
-        debugPrint('[Downloader]   Stack: $st');
-        rethrow;
+        final range = RegExp(
+          r'^bytes (\d+)-(\d+)/(\d+)$',
+        ).firstMatch(response.headers.value('content-range') ?? '');
+        if (range != null &&
+            int.parse(range[1]!) == offset &&
+            int.parse(range[2]!) >= offset &&
+            int.parse(range[2]!) + 1 == int.parse(range[3]!)) {
+          expected = int.parse(range[3]!);
+          break;
+        }
+        await response.data?.stream.listen(null).cancel();
+        throw DioException(
+          requestOptions: response.requestOptions,
+          response: response,
+          error: 'Invalid Content-Range',
+        );
+      } on DioException catch (error) {
+        if (CancelToken.isCancel(error) ||
+            attempt == 1 ||
+            !(error.response?.statusCode == 206 ||
+                error.response?.statusCode == 416 ||
+                (offset > 0 && error.response?.statusCode == 401)))
+          rethrow;
+        offset = 0;
+        response = null;
       }
     }
-    debugPrint('[Downloader] All files downloaded for engine=$engineId');
+    final body = response?.data;
+    if (body == null) throw StateError('Missing download response');
+    if (token.isCancelled) throw token.cancelError!;
+    final sink = partial.openWrite(
+      mode: offset > 0 ? FileMode.append : FileMode.write,
+    );
+    unawaited(sink.done.catchError((Object _) {}));
+    var received = offset;
+    try {
+      await for (final chunk in body.stream) {
+        if (token.isCancelled) throw token.cancelError!;
+        sink.add(chunk);
+        received += chunk.length;
+        yield FileProgress(
+          fileName: file.fileName,
+          receivedBytes: received,
+          totalBytes: expected ?? file.sizeBytes,
+        );
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    if (token.isCancelled) throw token.cancelError!;
+    if (received == 0 || (expected != null && received != expected)) {
+      throw StateError(
+        'Incomplete download of ${file.fileName}: $received / $expected',
+      );
+    }
+    await partial.rename(path);
   }
 
   Future<void> downloadVoiceEmbedding(Voice voice, String voiceUrl) async {
-    final engineDir = await getEngineDir(voice.engine);
-    final ext = voice.engine == EngineId.supertonic ? '.json' : '.bin';
-    final fileName = '${voice.id}$ext';
-    final filePath = '${engineDir.path}/voices/$fileName';
-    final file = File(filePath);
-
-    if (await file.exists()) return;
-
-    await file.create(recursive: true);
-    final response = await _dio.download(voiceUrl, filePath);
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Failed to download voice embedding: ${response.statusCode}',
+    final previous = _writeTail;
+    final finished = Completer<void>();
+    _writeTail = finished.future;
+    try {
+      await previous;
+      if (!RegExp(r'^[\w.-]+$').hasMatch(voice.id) || voice.id == '..') {
+        throw ArgumentError.value(voice.id, 'voice.id');
+      }
+      final dir = await getEngineDir(voice.engine);
+      final ext = voice.engine == EngineId.supertonic ? '.json' : '.bin';
+      final file = ModelFile(
+        fileName: '${voice.id}$ext',
+        downloadUrl: voiceUrl,
+        sizeBytes: 0,
       );
+      await _download(
+        file,
+        '${dir.path}/voices/${file.fileName}',
+        CancelToken(),
+      ).drain<void>();
+    } finally {
+      finished.complete();
     }
   }
 
-  void cancelDownload(EngineId engine) {
-    _activeDownloads[engine.name]?.cancel();
-  }
+  void cancelDownload(EngineId engine) =>
+      _activeDownloads[engine.name]?.cancel();
 
   Future<void> deleteEngine(EngineId engine) async {
-    final dir = await getEngineDir(engine);
-    if (await dir.exists()) {
-      await dir.delete(recursive: true);
+    cancelDownload(engine);
+    final previous = _writeTail;
+    final finished = Completer<void>();
+    _writeTail = finished.future;
+    try {
+      await previous;
+      final dir = await getEngineDir(engine);
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } finally {
+      finished.complete();
     }
   }
 
-  Future<void> deleteEngineFiles(EngineId engine) async {
-    final dir = await getEngineDir(engine);
-    final ttsDir = await getTtsDir();
-    final files = _coreFiles(engine);
-    for (final file in files) {
-      final isDictFile = file.fileName == 'en-us.bin';
-      final baseDir = isDictFile ? ttsDir : dir;
-      final f = File('${baseDir.path}/${file.fileName}');
-      if (await f.exists()) await f.delete();
-      final pf = File('${baseDir.path}/${file.fileName}.part');
-      if (await pf.exists()) await pf.delete();
-    }
-  }
+  // Linguistic data belongs to all engines and must survive removal of one.
+  Future<void> deleteEngineFiles(EngineId engine) => deleteEngine(engine);
 
-  Future<void> _unzipEspeakData(String zipPath, String targetDir) async {
-    final bytes = await File(zipPath).readAsBytes();
-    final archive = ZipDecoder().decodeBytes(bytes);
-
-    for (final file in archive) {
-      final filename = file.name;
-      if (file.isFile) {
-        final data = file.content as List<int>;
-        File('$targetDir/$filename')
-          ..createSync(recursive: true)
-          ..writeAsBytesSync(data);
-      } else {
-        Directory('$targetDir/$filename').createSync(recursive: true);
+  Future<void> _unzipEspeakData(
+    String zipPath,
+    String targetDir,
+    CancelToken token,
+  ) async {
+    final target = Directory('$targetDir/espeak-ng-data');
+    final marker = File('${target.path}/.complete');
+    if (await marker.exists()) return;
+    final staging = await Directory(targetDir).createTemp('.espeak-');
+    try {
+      final archive = ZipDecoder().decodeBytes(
+        await File(zipPath).readAsBytes(),
+      );
+      for (final entry in archive) {
+        if (token.isCancelled) throw token.cancelError!;
+        final name = entry.name.replaceAll('\\', '/');
+        final parts = name.split('/');
+        if (name.startsWith('/') ||
+            parts.contains('..') ||
+            name.contains(':') ||
+            entry.isSymbolicLink) {
+          throw FormatException('Unsafe archive entry: ${entry.name}');
+        }
+        // ZIPs made on macOS may contain harmless Finder metadata.
+        if (parts.first == '__MACOSX' || parts.last == '.DS_Store') continue;
+        if (parts.first != 'espeak-ng-data') {
+          throw FormatException('Unexpected archive root: ${entry.name}');
+        }
+        final path = '${staging.path}/$name';
+        if (entry.isFile) {
+          final output = File(path);
+          await output.parent.create(recursive: true);
+          await output.writeAsBytes(entry.content as List<int>);
+        } else {
+          await Directory(path).create(recursive: true);
+        }
       }
+      final extracted = Directory('${staging.path}/espeak-ng-data');
+      if (!await extracted.exists() ||
+          await extracted.list(recursive: true).isEmpty) {
+        throw const FormatException('Archive contains no linguistic data');
+      }
+      if (token.isCancelled) throw token.cancelError!;
+      await File('${extracted.path}/.complete').writeAsString('1');
+      if (await target.exists()) await target.delete(recursive: true);
+      await extracted.rename(target.path);
+    } finally {
+      if (await staging.exists()) await staging.delete(recursive: true);
     }
   }
 
@@ -585,101 +569,42 @@ class ModelDownloader {
     required int startByte,
     required CancelToken cancelToken,
   }) async {
-    String currentUrl = url;
-    final originalUri = Uri.parse(url);
-    // Track whether we crossed to a different host (e.g. HF → XetHub CDN).
-    // Pre-signed CDN URLs are signed only over 'host'; adding a Range header
-    // causes an AWS signature mismatch and a 401 response.
-    bool crossedHost = false;
-
-    debugPrint(
-      '[Downloader:resolve] Starting resolve: $url | startByte=$startByte',
-    );
-
-    for (int hop = 0; hop < 5; hop++) {
-      final currentUri = Uri.parse(currentUrl);
-      final isOnOriginalHost = currentUri.host == originalUri.host;
-      if (!isOnOriginalHost) crossedHost = true;
-
-      // Only send Range on the original host. CDN pre-signed URLs don't
-      // include Range in their AWS signature, so sending it would cause 401.
-      final effectiveStartByte = isOnOriginalHost ? startByte : 0;
-
-      debugPrint(
-        '[Downloader:resolve] hop=$hop host=${currentUri.host} isOriginalHost=$isOnOriginalHost effectiveStartByte=$effectiveStartByte crossedHost=$crossedHost',
-      );
-
-      final options = Options(
-        responseType: ResponseType.stream,
-        followRedirects: false,
-        validateStatus: (status) => status != null && status < 500,
-        headers: {
-          if (effectiveStartByte > 0) 'Range': 'bytes=$effectiveStartByte-',
-        },
-      );
-
-      if (!isOnOriginalHost) {
-        options.headers?.remove('Authorization');
-      }
-
-      debugPrint(
-        '[Downloader:resolve]   GET $currentUrl | headers=${options.headers}',
-      );
-
+    var current = Uri.parse(url);
+    final original = current;
+    var crossedHost = false;
+    for (var hop = 0; hop < 5; hop++) {
+      final sameHost = current.host == original.host;
+      crossedHost |= !sameHost;
       final response = await _dio.get<ResponseBody>(
-        currentUrl,
-        options: options,
+        current.toString(),
         cancelToken: cancelToken,
+        options: Options(
+          responseType: ResponseType.stream,
+          followRedirects: false,
+          validateStatus: (status) => status != null && status < 500,
+          headers: {
+            if (startByte > 0 && sameHost) 'Range': 'bytes=$startByte-',
+          },
+        ),
       );
-
-      debugPrint(
-        '[Downloader:resolve]   Response status=${response.statusCode}',
-      );
-      debugPrint(
-        '[Downloader:resolve]   Response headers: ${response.headers.map}',
-      );
-
-      if (response.statusCode == 200 || response.statusCode == 206) {
-        debugPrint(
-          '[Downloader:resolve] SUCCESS at hop=$hop | status=${response.statusCode}',
-        );
+      final status = response.statusCode ?? 0;
+      if (status == 200 || status == 206) {
         return ResolveResult(response: response, crossedHost: crossedHost);
       }
-
-      if (response.statusCode! >= 300 && response.statusCode! < 400) {
-        final location = response.headers.value('location');
-        if (location == null) {
-          debugPrint(
-            '[Downloader:resolve] ERROR: redirect ${response.statusCode} with no Location header',
-          );
-          throw DioException(
-            requestOptions: response.requestOptions,
-            error: 'Redirect without location header',
-          );
-        }
-        final nextUrl = Uri.parse(currentUrl).resolve(location).toString();
-        debugPrint(
-          '[Downloader:resolve]   Redirect ${response.statusCode} → $nextUrl',
-        );
-        currentUrl = nextUrl;
+      await response.data?.stream.listen(null).cancel();
+      final location = response.headers.value('location');
+      if ({301, 302, 303, 307, 308}.contains(status) && location != null) {
+        current = current.resolve(location);
         continue;
       }
-
-      debugPrint(
-        '[Downloader:resolve] ERROR: unexpected status=${response.statusCode} at hop=$hop url=$currentUrl',
-      );
       throw DioException(
         requestOptions: response.requestOptions,
         response: response,
-        error: 'Server returned ${response.statusCode}',
+        error:
+            'Download returned HTTP $status from ${current.host}${current.path}',
       );
     }
-
-    debugPrint('[Downloader:resolve] ERROR: too many redirects for $url');
-    throw DioException(
-      requestOptions: RequestOptions(path: url),
-      error: 'Too many redirects',
-    );
+    throw StateError('Too many redirects');
   }
 }
 

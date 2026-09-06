@@ -38,13 +38,13 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  neural_tts: ^0.1.0
+  neural_tts: ^0.4.0
 ```
 
 ### 2. Native Setup
 
 #### Android
-Ensure your `minSdkVersion` is at least **21** in `android/app/build.gradle`.
+Ensure your `minSdkVersion` is at least **24** in `android/app/build.gradle`.
 
 ---
 
@@ -70,7 +70,7 @@ final downloader = ModelDownloader();
 // Stream download progress
 final stream = downloader.downloadEngineFiles(EngineId.kokoro);
 await for (final progress in stream) {
-  print('Downloading ${progress.fileName}: ${progress.progress.toStringAsFixed(2)}%');
+  print('Downloading ${progress.fileName}: ${(progress.fraction * 100).toStringAsFixed(2)}%');
 }
 ```
 
@@ -153,6 +153,52 @@ if (status.isInstalled) {
 Once set, the engine will use Espeak-NG for high-fidelity IPA generation during all playback calls.
 
 ---
+
+### Completion, cancellation, and streaming
+
+`await engine.play(...)` and `await handle.finalize()` wait until the submitted
+audio finishes. `stop()` interrupts playback; interrupted operations fail instead
+of reporting successful completion. `release()` stops playback and waits for active
+inference before disposing resources. Engine instances can be loaded again after
+release.
+
+`TTSRuntime.stop()` and `release()` also fail queued acquisitions with `StateError`.
+Call `resetStop()` before submitting new runtime work. Loading and playback errors
+are returned to the awaiting caller.
+
+Kitten and Kokoro streams buffer incomplete sentences before phonemization, retain
+voice and playback settings, and initialize automatically. Only one native stream
+may be active at a time. `finalize()` and `cancel()` are idempotent; appending after
+either closes the handle throws `StateError`. Append failures are reported by
+`finalize()`. Stop or cancel a stream before switching native engines.
+
+Supertonic buffers text and synthesizes it on finalization; it does not provide
+incremental audio synthesis. System TTS does not support streaming. Audio-level
+streams are currently empty. Supertonic's Dart playback backend supports rate and
+volume; its pitch parameter is currently not applied.
+
+Downloads preserve partial files for retry, validate resumed responses, and mark
+linguistic data installed only after extraction succeeds. Removing one engine
+preserves the shared dictionary and linguistic data. Existing linguistic data
+without a completion marker is re-extracted from its downloaded archive.
+If the default linguistic archive is unavailable, construct
+`ModelDownloader(espeakArchiveUrl: yourArchiveUrl)` with a hosted archive generated
+by the included compiler. The archive must contain an `espeak-ng-data/` directory.
+
+### Running device smoke tests
+
+From `example/`, run:
+
+```sh
+flutter test integration_test/tts_smoke_test.dart -d <device-id>
+```
+
+Neural playback tests skip engines without installed models. Add
+`--dart-define=DOWNLOAD_TTS_MODELS=true` to download the configured models and test
+all engines. These downloads require network access and several hundred MB of
+storage. The smoke tests use the example’s bundled linguistic archive; remote
+archive availability is independent of playback. The system test requires an
+installed OS speech voice.
 
 ### Advanced Controls
 

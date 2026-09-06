@@ -1,101 +1,98 @@
 package com.localmind.neural_tts
 
 import android.content.Context
-import android.speech.tts.TextToSpeech
-import com.localmind.neural_tts.engines.KittenEngine
-import com.localmind.neural_tts.engines.KokoroEngine
-import com.localmind.neural_tts.engines.SupertonicEngine
-import com.localmind.neural_tts.engines.SystemEngine
-import com.localmind.neural_tts.engines.BaseEngine
+import com.localmind.neural_tts.engines.*
+import java.util.concurrent.CancellationException
 
-class TtsManager(private val context: Context) {
-    private var currentEngine: BaseEngine? = null
-    private val engines = mutableMapOf<String, BaseEngine>()
-
-    fun initialize(args: Map<*, *>) {
-        val engineName = args["engine"] as? String ?: "kokoro"
-        
-        if (currentEngine != null && !engines.containsKey(engineName)) {
-            currentEngine?.release()
+class TtsManager(private val context: Context?,
+    private val factory: (String) -> BaseEngine = { name ->
+        when (name) {
+            "kitten" -> KittenEngine()
+            "kokoro" -> KokoroEngine()
+            "supertonic" -> SupertonicEngine()
+            "system" -> SystemEngine()
+            else -> throw IllegalArgumentException("Unknown engine: $name")
         }
-        
-        val engine = engines.getOrPut(engineName) {
-            when (engineName) {
-                "kokoro" -> KokoroEngine()
-                "kitten" -> KittenEngine()
-                "supertonic" -> SupertonicEngine()
-                "system" -> SystemEngine()
-                else -> throw IllegalArgumentException("Unknown engine: $engineName")
-            }
+    }) {
+    private val lock = Any()
+    @Volatile private var currentEngine: BaseEngine? = null
+    private var engineName: String? = null
+    @Volatile var generation: Long = 0
+        private set
+    private var streamId: String? = null
+
+    fun checkGeneration(expected: Long) {
+        if (generation != expected) throw CancellationException("TTS operation cancelled")
+    }
+
+    // All methods except stop run on the plugin's single worker.
+    fun initialize(args: Map<*, *>, expected: Long = generation) {
+        checkGeneration(expected)
+        releaseCurrent()
+        val name = args["engine"] as? String ?: throw IllegalArgumentException("engine required")
+        val engine = factory(name)
+        synchronized(lock) {
+            checkGeneration(expected)
+            currentEngine = engine
+            engineName = name
+            engine.beginOperation()
         }
-        
-        val initArgs = if (engineName == "system") {
-            args + ("context" to context)
-        } else {
-            args
+        try {
+            engine.initialize(args + ("context" to context))
+            checkGeneration(expected)
+        } catch (error: Exception) {
+            releaseCurrent()
+            throw error
         }
-        
-        engine.initialize(initArgs)
-        currentEngine = engine
     }
 
-    fun speak(args: Map<*, *>) {
-        currentEngine?.speak(args)
+    private fun begin(args: Map<*, *>, expected: Long): BaseEngine = synchronized(lock) {
+        checkGeneration(expected)
+        if (args["engine"] != null && args["engine"] != engineName) {
+            throw IllegalStateException("Requested engine is not active")
+        }
+        val engine = currentEngine ?: throw IllegalStateException("TTS not initialized")
+        engine.beginOperation()
+        engine
     }
 
-    fun streamAppend(args: Map<*, *>) {
-        currentEngine?.streamAppend(args)
+    fun speak(args: Map<*, *>, expected: Long = generation) {
+        check(streamId == null) { "A stream is already active" }
+        begin(args, expected).speak(args)
+        checkGeneration(expected)
     }
 
-    fun streamFinalize(args: Map<*, *>) {
-        currentEngine?.streamFinalize(args)
+    fun streamAppend(args: Map<*, *>, expected: Long = generation) {
+        val id = args["streamId"] as? String ?: throw IllegalArgumentException("streamId required")
+        check(streamId == null || streamId == id) { "A stream is already active" }
+        val engine = begin(args, expected)
+        streamId = id
+        engine.speak(args)
+        checkGeneration(expected)
     }
 
-    fun streamCancel(args: Map<*, *>) {
-        currentEngine?.streamCancel(args)
+    fun streamFinalize(args: Map<*, *>, expected: Long = generation) {
+        checkGeneration(expected)
+        check(streamId == null || streamId == args["streamId"]) { "Unknown stream" }
+        // Append calls already wait for their submitted audio to finish.
+        streamId = null
     }
 
     fun stop() {
-        currentEngine?.stop()
-    }
-
-    fun release() {
-        currentEngine?.release()
-        currentEngine = null
-        engines.clear()
-    }
-
-    fun getAvailableVoices(): List<Map<String, Any?>> {
-        val result = mutableListOf<Map<String, Any?>>()
-        val latch = java.util.concurrent.CountDownLatch(1)
-        
-        var tts: TextToSpeech? = null
-        tts = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                try {
-                    val voices = tts?.voices ?: emptySet()
-                    for (voice in voices) {
-                        result.add(mapOf(
-                            "id" to voice.name,
-                            "name" to voice.name,
-                            "language" to voice.locale.language,
-                            "gender" to if (voice.latency > 0) "unknown" else "unknown" // Gender isn't easily exposed
-                        ))
-                    }
-                } catch (_: Exception) {}
-            }
-            latch.countDown()
+        synchronized(lock) {
+            generation++
+            currentEngine?.stop()
         }
-        
-        try {
-            latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
-        } catch (_: Exception) {}
-        
-        try {
-            tts.stop()
-            tts.shutdown()
-        } catch (_: Exception) {}
-        
-        return result
     }
+
+    fun clearStream() { streamId = null }
+    private fun releaseCurrent() {
+        val engine = synchronized(lock) {
+            currentEngine.also { currentEngine = null; engineName = null }
+        }
+        clearStream()
+        engine?.release()
+    }
+    fun release() = releaseCurrent()
+    fun getAvailableVoices(): List<Map<String, Any?>> = SystemEngine.availableVoices(requireNotNull(context))
 }

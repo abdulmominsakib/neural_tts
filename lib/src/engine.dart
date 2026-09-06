@@ -123,6 +123,7 @@ abstract class Engine {
 
   Future<void> load();
 
+  /// Completes when audio finishes; interruption completes with an error.
   Future<void> play(
     String text,
     Voice voice, {
@@ -146,6 +147,7 @@ abstract class Engine {
 
   Future<void> stop();
 
+  /// Stops playback and disposes resources after active inference finishes.
   Future<void> release();
 
   void setPhonemizer(Phonemizer phonemizer);

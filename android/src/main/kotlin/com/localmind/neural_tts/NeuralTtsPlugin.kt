@@ -1,108 +1,86 @@
 package com.localmind.neural_tts
 
-import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
-import android.media.AudioTrack.OnPlaybackPositionUpdateListener
-import android.os.Build
-import android.os.Bundle
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
-import androidx.annotation.NonNull
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
-import io.flutter.plugin.common.BinaryMessenger
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler
-import io.flutter.plugin.common.MethodChannel.Result
-import java.io.File
-import java.util.Locale
-import java.util.UUID
+import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
-class NeuralTtsPlugin : FlutterPlugin, MethodCallHandler {
+class NeuralTtsPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var channel: MethodChannel
-    private lateinit var context: Context
-    private var ttsManager: TtsManager? = null
-    private val streamChannels = ConcurrentHashMap<String, EventChannel>()
-    private var coroutineScope: CoroutineScope? = null
+    private var manager: TtsManager? = null
+    private var worker: java.util.concurrent.ExecutorService? = null
+    private val main = Handler(Looper.getMainLooper())
+    private val pending = ConcurrentHashMap.newKeySet<Reply>()
+
+    private inner class Reply(val result: MethodChannel.Result) {
+        private val completed = AtomicBoolean(false)
+        fun finish(error: Throwable? = null, value: Any? = null, unknown: Boolean = false) {
+            if (!completed.compareAndSet(false, true)) return
+            pending.remove(this)
+            main.post {
+                when {
+                    error != null -> result.error("TTS_ERROR", error.message, null)
+                    unknown -> result.notImplemented()
+                    else -> result.success(value)
+                }
+            }
+        }
+    }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(binding.binaryMessenger, "com.localmind.neural_tts")
+        manager = TtsManager(binding.applicationContext)
+        worker = Executors.newSingleThreadExecutor()
         channel.setMethodCallHandler(this)
-        context = binding.applicationContext
-        ttsManager = TtsManager(context)
-        coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
-        ttsManager?.release()
-        ttsManager = null
-        streamChannels.values.forEach { it.setStreamHandler(null) }
-        streamChannels.clear()
-        coroutineScope?.cancel()
-        coroutineScope = null
+        val retiring = manager
+        manager = null
+        retiring?.stop()
+        pending.toList().forEach { it.finish(IllegalStateException("TTS plugin detached")) }
+        worker?.execute { retiring?.release() }
+        worker?.shutdown()
+        worker = null
     }
 
-    override fun onMethodCall(call: MethodCall, result: Result) {
-        coroutineScope?.launch {
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        val reply = Reply(result)
+        pending.add(reply)
+        val tts = manager
+        val executor = worker
+        if (tts == null || executor == null) {
+            reply.finish(IllegalStateException("TTS plugin detached")); return
+        }
+        // Invalidate queued work and pause active audio without waiting behind inference.
+        if (call.method in setOf("tts.stop", "tts.stream.cancel", "tts.release")) tts.stop()
+        val generation = tts.generation
+        executor.execute {
             try {
+                val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any?>()
+                if (call.method !in setOf("tts.stop", "tts.stream.cancel", "tts.release")) {
+                    tts.checkGeneration(generation)
+                }
                 when (call.method) {
-                    "tts.initialize" -> {
-                        val args = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Missing arguments")
-                        ttsManager?.initialize(args)
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.speak" -> {
-                        val args = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Missing arguments")
-                        ttsManager?.speak(args)
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.stream.append" -> {
-                        val args = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Missing arguments")
-                        ttsManager?.streamAppend(args)
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.stream.finalize" -> {
-                        val args = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Missing arguments")
-                        ttsManager?.streamFinalize(args)
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.stream.cancel" -> {
-                        val args = call.arguments as? Map<*, *> ?: throw IllegalArgumentException("Missing arguments")
-                        ttsManager?.streamCancel(args)
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.stop" -> {
-                        ttsManager?.stop()
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
-                    "tts.release" -> {
-                        ttsManager?.release()
-                        withContext(Dispatchers.Main) { result.success(null) }
-                    }
+                    "tts.initialize" -> tts.initialize(args, generation)
+                    "tts.speak" -> tts.speak(args, generation)
+                    "tts.stream.append" -> tts.streamAppend(args, generation)
+                    "tts.stream.finalize" -> tts.streamFinalize(args, generation)
+                    "tts.stop", "tts.stream.cancel" -> tts.clearStream()
+                    "tts.release" -> tts.release()
                     "tts.getAvailableVoices" -> {
-                        val voices = ttsManager?.getAvailableVoices() ?: listOf<Map<String, Any?>>()
-                        withContext(Dispatchers.Main) { result.success(voices) }
+                        reply.finish(value = tts.getAvailableVoices()); return@execute
                     }
-                    else -> withContext(Dispatchers.Main) { result.notImplemented() }
+                    else -> { reply.finish(unknown = true); return@execute }
                 }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    android.util.Log.e("NeuralTtsPlugin", "TTS Error", e)
-                    result.error("TTS_ERROR", e.message ?: "Unknown error", null)
-                }
+                reply.finish()
+            } catch (error: Exception) {
+                reply.finish(error)
             }
         }
     }

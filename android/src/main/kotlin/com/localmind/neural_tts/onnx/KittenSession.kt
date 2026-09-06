@@ -28,6 +28,7 @@ class KittenSession(
 ) {
     private var session: OrtSession? = null
     private var initialized = false
+    private var closed = false
 
     // vocab path for the Tokenizer is the dict file (IPA → id), NOT the npz.
     private val tokenizer = Tokenizer(dictPath)
@@ -35,14 +36,18 @@ class KittenSession(
     // Cache of loaded voice embeddings: voiceId → float32 matrix [T][D]
     private val voiceEmbeddings = mutableMapOf<String, Array<FloatArray>>()
 
+    @Synchronized
     fun initialize(): Boolean {
+        if (closed) throw IllegalStateException("Session is closed")
         if (initialized) return true
         session = OnnxRuntimeHolder.createSession(modelPath)
         initialized = true
         return true
     }
 
+    @Synchronized
     fun synthesize(text: String, voiceId: String, speed: Float = 1.0f): ByteArray {
+        if (closed) throw IllegalStateException("Session is closed")
         if (!initialized) initialize()
         tokenizer.initialize()
 
@@ -52,47 +57,52 @@ class KittenSession(
         // ── 1. Tokenise ──────────────────────────────────────────────────────
         val tokens = tokenizer.encode(text)
         val inputIds: Array<LongArray> = arrayOf(tokens)
-        val inputIdsTensor = OnnxTensor.createTensor(env, inputIds)
+        val owned = mutableListOf<OnnxTensor>()
+        try {
+            val inputIdsTensor = OnnxTensor.createTensor(env, inputIds).also { owned.add(it) }
 
-        // ── 2. Style embedding ───────────────────────────────────────────────
-        val embedMatrix = loadVoiceEmbedding(voiceId)
-        val refIdx = minOf(text.length, embedMatrix.size - 1)
-        val styleRow: Array<FloatArray> = arrayOf(embedMatrix[refIdx])
-        val styleTensor = OnnxTensor.createTensor(env, styleRow)
+            // ── 2. Style embedding ───────────────────────────────────────────────
+            val embedMatrix = loadVoiceEmbedding(voiceId)
+            val refIdx = minOf(text.length, embedMatrix.size - 1)
+            val styleRow: Array<FloatArray> = arrayOf(embedMatrix[refIdx])
+            val styleTensor = OnnxTensor.createTensor(env, styleRow).also { owned.add(it) }
 
-        // ── 3. Speed ─────────────────────────────────────────────────────────
-        val speedTensor = OnnxTensor.createTensor(env, floatArrayOf(speed))
+            // ── 3. Speed ─────────────────────────────────────────────────────────
+            val speedTensor = OnnxTensor.createTensor(env, floatArrayOf(speed)).also { owned.add(it) }
 
-        // ── 4. Run inference ─────────────────────────────────────────────────
-        val inputs = mapOf(
-            "input_ids" to inputIdsTensor,
-            "style"     to styleTensor,
-            "speed"     to speedTensor,
-        )
-        val result = ortSession.run(inputs)
+            // ── 4. Run inference ─────────────────────────────────────────────────
+            val inputs = mutableMapOf(
+                "input_ids" to inputIdsTensor,
+                "style"     to styleTensor,
+                "speed"     to speedTensor,
+            )
+            val result = ortSession.run(inputs)
+            try {
+                // Try getting output by name, falling back to index 0 if names don't match.
+                val rawOutput: OnnxTensor? =
+                    result.get("audio").orElse(null) as? OnnxTensor
+                        ?: result.get("output").orElse(null) as? OnnxTensor
+                        ?: result.get(0) as? OnnxTensor
 
-        // Try getting output by name, falling back to index 0 if names don't match.
-        val rawOutput: OnnxTensor? =
-            result.get("audio") as? OnnxTensor
-                ?: result.get("output") as? OnnxTensor
-                ?: result.get(0) as? OnnxTensor
+                val outputTensor = rawOutput
+                    ?: throw IllegalStateException("No audio output tensor found in model output")
 
-        val outputTensor = rawOutput
-            ?: throw IllegalStateException("No audio output tensor found in model output")
+                val floatBuffer = outputTensor.floatBuffer
+                val floats = FloatArray(floatBuffer.remaining())
+                floatBuffer.get(floats)
 
-        val floatBuffer = outputTensor.floatBuffer
-        val floats = FloatArray(floatBuffer.remaining())
-        floatBuffer.get(floats)
+                // Trim trailing ~5 000 samples (silence artifact, matches Python impl)
+                val trimmed = if (floats.size > 5000) floats.copyOf(floats.size - 5000) else floats
 
-        // Trim trailing ~5 000 samples (silence artifact, matches Python impl)
-        val trimmed = if (floats.size > 5000) floats.copyOf(floats.size - 5000) else floats
-
-        // Convert float32 [-1,1] → PCM int16 LE
-        val pcm = FloatToPcm16(trimmed)
-        
-        result.close() // Close the result to release native memory
-        
-        return prependWavHeader(pcm, sampleRate = 24000)
+                // Convert float32 [-1,1] → PCM int16 LE
+                val pcm = FloatToPcm16(trimmed)
+                return prependWavHeader(pcm, sampleRate = 24000)
+            } finally {
+                result.close()
+            }
+        } finally {
+            owned.forEach { try { it.close() } catch (_: Exception) {} }
+        }
     }
 
     // ── Voice embedding loader (NPZ / NPY parser) ──────────────────────────
@@ -203,7 +213,10 @@ class KittenSession(
         return result
     }
 
+    @Synchronized
     fun close() {
+        if (closed) return
+        closed = true
         try { session?.close() } catch (_: Exception) {}
         session = null
         initialized = false

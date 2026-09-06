@@ -181,6 +181,9 @@ class FileProgress {
     this.isComplete = false,
   });
 
-  double get fraction =>
-      totalBytes > 0 ? (receivedBytes / totalBytes).clamp(0.0, 1.0) : 0.0;
+  double get fraction => isComplete
+      ? 1.0
+      : totalBytes > 0
+      ? (receivedBytes / totalBytes).clamp(0.0, 1.0)
+      : 0.0;
 }

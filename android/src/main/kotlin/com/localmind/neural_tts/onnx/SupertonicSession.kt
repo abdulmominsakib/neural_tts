@@ -19,6 +19,7 @@ class SupertonicSession(
     private var vectorEstimator: OrtSession? = null
     private var vocoder: OrtSession? = null
     private var initialized = false
+    private var closed = false
     private val tokenizer = Tokenizer(unicodeIndexerPath)
     private val voiceCache = mutableMapOf<String, VoiceStyle>()
 
@@ -43,17 +44,26 @@ class SupertonicSession(
         return list.toFloatArray()
     }
 
+    @Synchronized
     fun initialize(): Boolean {
+        if (closed) throw IllegalStateException("Session is closed")
         if (initialized) return true
-        durationPredictor = OnnxRuntimeHolder.createSession(durationPredictorPath)
-        textEncoder = OnnxRuntimeHolder.createSession(textEncoderPath)
-        vectorEstimator = OnnxRuntimeHolder.createSession(vectorEstimatorPath)
-        vocoder = OnnxRuntimeHolder.createSession(vocoderPath)
+        try {
+            durationPredictor = OnnxRuntimeHolder.createSession(durationPredictorPath)
+            textEncoder = OnnxRuntimeHolder.createSession(textEncoderPath)
+            vectorEstimator = OnnxRuntimeHolder.createSession(vectorEstimatorPath)
+            vocoder = OnnxRuntimeHolder.createSession(vocoderPath)
+        } catch (error: Exception) {
+            close()
+            throw error
+        }
         initialized = true
         return true
     }
 
+    @Synchronized
     fun synthesize(text: String, voiceId: String, language: String, steps: Int): ByteArray {
+        if (closed) throw IllegalStateException("Session is closed")
         if (!initialized) initialize()
         tokenizer.initialize()
 
@@ -73,130 +83,171 @@ class SupertonicSession(
         android.util.Log.d("NeuralTtsPlugin", "Token count: ${tokens.size}")
 
         // --- Step 1: Text Encoding ---
-        val encodedResult = try {
-            textEncoder?.let { enc ->
-                val inputs = mutableMapOf<String, OnnxTensor>()
-                if (inputNames.contains("text_ids")) {
-                    inputs["text_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
-                } else {
-                    inputs["input"] = OnnxTensor.createTensor(env, arrayOf(tokens))
-                }
-                if (inputNames.contains("style_ttl")) {
-                    val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleTtlData)
-                    inputs["style_ttl"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleTtlShape)
-                } else if (inputNames.contains("style")) {
-                    val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleTtlData)
-                    inputs["style"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleTtlShape)
-                }
-                if (inputNames.contains("text_mask")) {
-                    val mask = FloatArray(tokens.size) { 1.0f }
-                    inputs["text_mask"] = OnnxTensor.createTensor(env, arrayOf(arrayOf(mask)))
-                }
-                enc.run(inputs)
-            } ?: throw IllegalStateException("Text encoder not initialized")
-        } catch (e: Exception) {
-            throw RuntimeException("Error in Text Encoding: ${e.message}", e)
-        }
-
-        // Log all text encoder output names and shapes
-        for (entry in encodedResult) {
-            val tensor = entry.value as? OnnxTensor
-            android.util.Log.d("NeuralTtsPlugin", "TextEncoder output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
-        }
-
-        val encodedValue = encodedResult.find { it.key == "output" || it.key == "text_emb" }?.value 
-                           ?: encodedResult.iterator().next().value
-        val encodedTensor = encodedValue as OnnxTensor
-        val encodedShape = encodedTensor.info.shape
-        val encodedBuffer = encodedTensor.floatBuffer
-        val encodedVec = FloatArray(encodedBuffer.remaining())
-        encodedBuffer.get(encodedVec)
-        android.util.Log.d("NeuralTtsPlugin", "Encoded shape: ${encodedShape.toList()}, data size: ${encodedVec.size}")
-        encodedResult.close()
+        val (encodedVec, encodedShape) = runTextEncoder(env, tokens, voiceStyle, inputNames)
 
         // --- Step 2: Duration Prediction ---
-        val durationResult = try {
-            durationPredictor?.let { dp ->
-                val inputs = mutableMapOf<String, OnnxTensor>()
-                if (dpInputNames.contains("text_ids")) {
-                    inputs["text_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
-                } else if (dpInputNames.contains("encoded")) {
-                    val buf = java.nio.FloatBuffer.wrap(encodedVec)
-                    inputs["encoded"] = OnnxTensor.createTensor(env, buf, encodedShape)
-                }
-                if (dpInputNames.contains("style_dp")) {
-                    val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleDpData)
-                    inputs["style_dp"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleDpShape)
-                } else if (dpInputNames.contains("style")) {
-                    val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleDpData)
-                    inputs["style"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleDpShape)
-                }
-                if (dpInputNames.contains("text_mask")) {
-                    val mask = FloatArray(tokens.size) { 1.0f }
-                    inputs["text_mask"] = OnnxTensor.createTensor(env, arrayOf(arrayOf(mask)))
-                }
-                dp.run(inputs)
-            } ?: throw IllegalStateException("Duration predictor not initialized")
-        } catch (e: Exception) {
-            throw RuntimeException("Error in Duration Predictor: ${e.message}", e)
-        }
-
-        // Extract durations and compute total mel frames
-        for (entry in durationResult) {
-            val tensor = entry.value as? OnnxTensor
-            android.util.Log.d("NeuralTtsPlugin", "DurationPredictor output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
-        }
-
-        val durationValue = durationResult.find { it.key == "durations" || it.key == "output" }?.value
-                            ?: durationResult.iterator().next().value
-        val durationTensor = durationValue as OnnxTensor
-        val durationShape = durationTensor.info.shape
-        android.util.Log.d("NeuralTtsPlugin", "Duration tensor shape: ${durationShape.toList()}")
-
-        // Durations can be float (predicted) or long — extract as floats then ceil/round
-        val durationBuffer = durationTensor.floatBuffer
-        val durationFloats = FloatArray(durationBuffer.remaining())
-        durationBuffer.get(durationFloats)
-        android.util.Log.d("NeuralTtsPlugin", "Raw durations (first 10): ${durationFloats.take(10)}")
-
-        // Total mel frames = sum of rounded durations
-        val melFrames = durationFloats.sumOf { Math.ceil(it.toDouble().coerceAtLeast(0.0)).toInt() }
-        android.util.Log.d("NeuralTtsPlugin", "Computed mel frames T=$melFrames from ${durationFloats.size} durations")
-        durationResult.close()
+        val melFrames = runDurationPredictor(env, tokens, voiceStyle, encodedVec, encodedShape, dpInputNames)
 
         if (melFrames <= 0) {
             throw RuntimeException("Duration predictor returned zero mel frames")
         }
 
         // --- Step 3: Vector Estimation (denoising loop) ---
-        // Determine n_mels from the vector estimator's expected input shape
-        // The model expects noisy_latent with shape [1, n_mels, T]
+        val (currentLatent, latentShape) = runVectorEstimator(env, voiceStyle, encodedVec, encodedShape, veInputNames, steps, melFrames, tokens.size)
+
+        // --- Step 4: Vocoder ---
+        val floats = runVocoder(env, currentLatent, latentShape, vocInputNames)
+
+        val bytes = ByteArray(floats.size * 2)
+        for (i in floats.indices) {
+            val sample = (floats[i] * 32767).toInt().coerceIn(-32768, 32767)
+            bytes[i * 2] = (sample and 0xFF).toByte()
+            bytes[(i * 2) + 1] = ((sample shr 8) and 0xFF).toByte()
+        }
+        return bytes
+    }
+
+    private fun runTextEncoder(
+        env: ai.onnxruntime.OrtEnvironment,
+        tokens: LongArray,
+        voiceStyle: VoiceStyle,
+        inputNames: Set<String>
+    ): Pair<FloatArray, LongArray> {
+        val inputs = mutableMapOf<String, OnnxTensor>()
+        val enc = textEncoder ?: throw IllegalStateException("Text encoder not initialized")
+        try {
+            if (inputNames.contains("text_ids")) {
+                inputs["text_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
+            } else {
+                inputs["input"] = OnnxTensor.createTensor(env, arrayOf(tokens))
+            }
+            if (inputNames.contains("style_ttl")) {
+                val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleTtlData)
+                inputs["style_ttl"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleTtlShape)
+            } else if (inputNames.contains("style")) {
+                val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleTtlData)
+                inputs["style"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleTtlShape)
+            }
+            if (inputNames.contains("text_mask")) {
+                val mask = FloatArray(tokens.size) { 1.0f }
+                inputs["text_mask"] = OnnxTensor.createTensor(env, arrayOf(arrayOf(mask)))
+            }
+
+            val encodedResult = enc.run(inputs)
+            try {
+                for (entry in encodedResult) {
+                    val tensor = entry.value as? OnnxTensor
+                    android.util.Log.d("NeuralTtsPlugin", "TextEncoder output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
+                }
+
+                val encodedValue = encodedResult.find { it.key == "output" || it.key == "text_emb" }?.value
+                                   ?: encodedResult.iterator().next().value
+                val encodedTensor = encodedValue as OnnxTensor
+                val encodedShape = encodedTensor.info.shape
+                val encodedBuffer = encodedTensor.floatBuffer
+                val encodedVec = FloatArray(encodedBuffer.remaining())
+                encodedBuffer.get(encodedVec)
+                android.util.Log.d("NeuralTtsPlugin", "Encoded shape: ${encodedShape.toList()}, data size: ${encodedVec.size}")
+                return Pair(encodedVec, encodedShape)
+            } finally {
+                encodedResult.close()
+            }
+        } finally {
+            inputs.values.forEach { try { it.close() } catch (_: Exception) {} }
+        }
+    }
+
+    private fun runDurationPredictor(
+        env: ai.onnxruntime.OrtEnvironment,
+        tokens: LongArray,
+        voiceStyle: VoiceStyle,
+        encodedVec: FloatArray,
+        encodedShape: LongArray,
+        dpInputNames: Set<String>
+    ): Int {
+        val inputs = mutableMapOf<String, OnnxTensor>()
+        val dp = durationPredictor ?: throw IllegalStateException("Duration predictor not initialized")
+        try {
+            if (dpInputNames.contains("text_ids")) {
+                inputs["text_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
+            } else if (dpInputNames.contains("encoded")) {
+                val buf = java.nio.FloatBuffer.wrap(encodedVec)
+                inputs["encoded"] = OnnxTensor.createTensor(env, buf, encodedShape)
+            }
+            if (dpInputNames.contains("style_dp")) {
+                val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleDpData)
+                inputs["style_dp"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleDpShape)
+            } else if (dpInputNames.contains("style")) {
+                val buf = java.nio.FloatBuffer.wrap(voiceStyle.styleDpData)
+                inputs["style"] = OnnxTensor.createTensor(env, buf, voiceStyle.styleDpShape)
+            }
+            if (dpInputNames.contains("text_mask")) {
+                val mask = FloatArray(tokens.size) { 1.0f }
+                inputs["text_mask"] = OnnxTensor.createTensor(env, arrayOf(arrayOf(mask)))
+            }
+
+            val durationResult = dp.run(inputs)
+            try {
+                for (entry in durationResult) {
+                    val tensor = entry.value as? OnnxTensor
+                    android.util.Log.d("NeuralTtsPlugin", "DurationPredictor output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
+                }
+
+                val durationValue = durationResult.find { it.key == "durations" || it.key == "output" }?.value
+                                    ?: durationResult.iterator().next().value
+                val durationTensor = durationValue as OnnxTensor
+                val durationShape = durationTensor.info.shape
+                android.util.Log.d("NeuralTtsPlugin", "Duration tensor shape: ${durationShape.toList()}")
+
+                val durationBuffer = durationTensor.floatBuffer
+                val durationFloats = FloatArray(durationBuffer.remaining())
+                durationBuffer.get(durationFloats)
+                android.util.Log.d("NeuralTtsPlugin", "Raw durations (first 10): ${durationFloats.take(10)}")
+
+                val melFrames = durationFloats.sumOf { Math.ceil(it.toDouble().coerceAtLeast(0.0)).toInt() }
+                android.util.Log.d("NeuralTtsPlugin", "Computed mel frames T=$melFrames from ${durationFloats.size} durations")
+                return melFrames
+            } finally {
+                durationResult.close()
+            }
+        } finally {
+            inputs.values.forEach { try { it.close() } catch (_: Exception) {} }
+        }
+    }
+
+    private fun runVectorEstimator(
+        env: ai.onnxruntime.OrtEnvironment,
+        voiceStyle: VoiceStyle,
+        encodedVec: FloatArray,
+        encodedShape: LongArray,
+        veInputNames: Set<String>,
+        steps: Int,
+        melFrames: Int,
+        tokenCount: Int
+    ): Pair<FloatArray, LongArray> {
         val veSession = vectorEstimator ?: throw IllegalStateException("Vector estimator not initialized")
         val noisyLatentInfo = veSession.inputInfo["noisy_latent"]
         val noisyLatentExpectedShape = (noisyLatentInfo?.info as? ai.onnxruntime.TensorInfo)?.shape
         val nMels = if (noisyLatentExpectedShape != null && noisyLatentExpectedShape.size >= 2) {
-            noisyLatentExpectedShape[1].toInt()  // [batch, n_mels, T]
+            noisyLatentExpectedShape[1].toInt()
         } else {
-            144  // default fallback
+            144
         }
         android.util.Log.d("NeuralTtsPlugin", "n_mels=$nMels (from model input info)")
 
         val latentShape = longArrayOf(1, nMels.toLong(), melFrames.toLong())
         val latentSize = nMels * melFrames
 
-        // Initialize noisy_latent with random noise
         val random = java.util.Random()
         var currentLatent = FloatArray(latentSize) { random.nextGaussian().toFloat() }
         android.util.Log.d("NeuralTtsPlugin", "Initial latent shape: ${latentShape.toList()}, size: $latentSize")
 
-        // Text mask: [1, 1, L] where L = token count
-        val textLen = tokens.size
-        // Latent mask: [1, 1, T] where T = mel frames
+        val textLen = tokenCount
         val latentLen = melFrames
 
         for (step in 0 until steps) {
-            val estimatedResult = try {
-                val inputs = mutableMapOf<String, OnnxTensor>()
+            val inputs = mutableMapOf<String, OnnxTensor>()
+            try {
                 if (veInputNames.contains("noisy_latent")) {
                     val buf = java.nio.FloatBuffer.wrap(currentLatent)
                     inputs["noisy_latent"] = OnnxTensor.createTensor(env, buf, latentShape)
@@ -242,64 +293,66 @@ class SupertonicSession(
                     }
                 }
 
-                veSession.run(inputs)
-            } catch (e: Exception) {
-                throw RuntimeException("Error in Vector Estimator step $step: ${e.message}", e)
-            }
+                val estimatedResult = veSession.run(inputs)
+                try {
+                    if (step == 0) {
+                        for (entry in estimatedResult) {
+                            val tensor = entry.value as? OnnxTensor
+                            android.util.Log.d("NeuralTtsPlugin", "VE output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
+                        }
+                    }
 
-            if (step == 0) {
-                for (entry in estimatedResult) {
-                    val tensor = entry.value as? OnnxTensor
-                    android.util.Log.d("NeuralTtsPlugin", "VE output '${entry.key}' shape: ${tensor?.info?.shape?.toList()}")
+                    val estValue = estimatedResult.find { it.key == "output" }?.value
+                                   ?: estimatedResult.iterator().next().value
+                    val estTensor = estValue as OnnxTensor
+                    val estBuffer = estTensor.floatBuffer
+                    currentLatent = FloatArray(estBuffer.remaining())
+                    estBuffer.get(currentLatent)
+                } finally {
+                    estimatedResult.close()
                 }
+            } finally {
+                inputs.values.forEach { try { it.close() } catch (_: Exception) {} }
             }
-
-            val estValue = estimatedResult.find { it.key == "output" }?.value
-                           ?: estimatedResult.iterator().next().value
-            val estTensor = estValue as OnnxTensor
-            val estBuffer = estTensor.floatBuffer
-            currentLatent = FloatArray(estBuffer.remaining())
-            estBuffer.get(currentLatent)
-            estimatedResult.close()
         }
+        return Pair(currentLatent, latentShape)
+    }
 
-        // --- Step 4: Vocoder ---
-        // Determine vocoder input shape from its output of the VE (should be [1, n_mels, T])
+    private fun runVocoder(
+        env: ai.onnxruntime.OrtEnvironment,
+        currentLatent: FloatArray,
+        latentShape: LongArray,
+        vocInputNames: Set<String>
+    ): FloatArray {
         val vocoderSession = vocoder ?: throw IllegalStateException("Vocoder not initialized")
         val vocInputInfo = vocoderSession.inputInfo
         android.util.Log.d("NeuralTtsPlugin", "Vocoder input info: ${vocInputInfo.keys}")
 
-        val audioResult = try {
-            val inputs = mutableMapOf<String, OnnxTensor>()
+        val inputs = mutableMapOf<String, OnnxTensor>()
+        try {
             val buf = java.nio.FloatBuffer.wrap(currentLatent)
-            // Use latentShape since vocoder takes mel spectrogram [1, n_mels, T]
             val vocInputName = if (vocInputNames.contains("spectrogram")) "spectrogram"
                                else if (vocInputNames.contains("mel")) "mel"
                                else if (vocInputNames.contains("latent")) "latent"
                                else "input"
             inputs[vocInputName] = OnnxTensor.createTensor(env, buf, latentShape)
             android.util.Log.d("NeuralTtsPlugin", "Vocoder input '$vocInputName' shape: ${latentShape.toList()}")
-            vocoderSession.run(inputs)
-        } catch (e: Exception) {
-            throw RuntimeException("Error in Vocoder: ${e.message}", e)
+            val audioResult = vocoderSession.run(inputs)
+            try {
+                val audioValue = audioResult.find { it.key == "audio" || it.key == "output" }?.value
+                                 ?: audioResult.iterator().next().value
+                val audioTensor = audioValue as OnnxTensor
+                android.util.Log.d("NeuralTtsPlugin", "Vocoder output shape: ${audioTensor.info.shape.toList()}")
+                val audioBuffer = audioTensor.floatBuffer
+                val floats = FloatArray(audioBuffer.remaining())
+                audioBuffer.get(floats)
+                return floats
+            } finally {
+                audioResult.close()
+            }
+        } finally {
+            inputs.values.forEach { try { it.close() } catch (_: Exception) {} }
         }
-
-        val audioValue = audioResult.find { it.key == "audio" || it.key == "output" }?.value
-                         ?: audioResult.iterator().next().value
-        val audioTensor = audioValue as OnnxTensor
-        android.util.Log.d("NeuralTtsPlugin", "Vocoder output shape: ${audioTensor.info.shape.toList()}")
-        val audioBuffer = audioTensor.floatBuffer
-        val floats = FloatArray(audioBuffer.remaining())
-        audioBuffer.get(floats)
-        audioResult.close()
-
-        val bytes = ByteArray(floats.size * 2)
-        for (i in floats.indices) {
-            val sample = (floats[i] * 32767).toInt().coerceIn(-32768, 32767)
-            bytes[i * 2] = (sample and 0xFF).toByte()
-            bytes[(i * 2) + 1] = ((sample shr 8) and 0xFF).toByte()
-        }
-        return bytes
     }
 
     private fun loadVoiceStyle(voiceId: String): VoiceStyle {
@@ -327,7 +380,10 @@ class SupertonicSession(
         return style
     }
 
+    @Synchronized
     fun close() {
+        if (closed) return
+        closed = true
         listOf(durationPredictor, textEncoder, vectorEstimator, vocoder).forEach {
             try { it?.close() } catch (_: Exception) {}
         }

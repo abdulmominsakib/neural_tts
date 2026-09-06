@@ -15,13 +15,16 @@ class KokoroSession(
 ) {
     private var session: OrtSession? = null
     private var initialized = false
+    private var closed = false
     private var vocab: Map<String, Int> = emptyMap()
     private val voiceCache = mutableMapOf<String, Array<FloatArray>>()
 
+    @Synchronized
     fun initialize(): Boolean {
+        if (closed) throw IllegalStateException("Session is closed")
         if (initialized) return true
-        session = OnnxRuntimeHolder.createSession(modelPath)
         loadTokenizer()
+        session = OnnxRuntimeHolder.createSession(modelPath)
         initialized = true
         return true
     }
@@ -54,7 +57,9 @@ class KokoroSession(
         return result.toLongArray()
     }
 
+    @Synchronized
     fun synthesize(text: String, voiceId: String): ByteArray {
+        if (closed) throw IllegalStateException("Session is closed")
         if (!initialized) initialize()
         if (vocab.isEmpty()) throw IllegalStateException("Tokenizer not initialized")
 
@@ -72,39 +77,46 @@ class KokoroSession(
         val styleRow = voiceEmbedding[refIdx] // FloatArray(256)
 
         val inputs = mutableMapOf<String, OnnxTensor>()
-        val inputNames = ortSession.inputNames
+        try {
+            val inputNames = ortSession.inputNames
 
-        if (inputNames.contains("input_ids")) {
-            inputs["input_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
+            if (inputNames.contains("input_ids")) {
+                inputs["input_ids"] = OnnxTensor.createTensor(env, arrayOf(tokens))
+            }
+            if (inputNames.contains("style")) {
+                inputs["style"] = OnnxTensor.createTensor(env, arrayOf(styleRow))
+            }
+            if (inputNames.contains("speed")) {
+                inputs["speed"] = OnnxTensor.createTensor(env, floatArrayOf(1.0f))
+            }
+
+            val result = ortSession.run(inputs)
+            try {
+                val rawOutput: OnnxTensor? =
+                    result.get("audio").orElse(null) as? OnnxTensor
+                        ?: result.get("output").orElse(null) as? OnnxTensor
+                        ?: result.get(0) as? OnnxTensor
+
+                val outputTensor = rawOutput
+                    ?: throw IllegalStateException("No audio output tensor")
+                val floatBuffer = outputTensor.floatBuffer
+                val floats = FloatArray(floatBuffer.remaining())
+                floatBuffer.get(floats)
+
+                val bytes = ByteArray(floats.size * 2)
+                for (i in floats.indices) {
+                    val sample = (floats[i] * 32767).toInt().coerceIn(-32768, 32767)
+                    bytes[i * 2] = (sample and 0xFF).toByte()
+                    bytes[(i * 2) + 1] = ((sample shr 8) and 0xFF).toByte()
+                }
+
+                return bytes
+            } finally {
+                result.close()
+            }
+        } finally {
+            inputs.values.forEach { try { it.close() } catch (_: Exception) {} }
         }
-        if (inputNames.contains("style")) {
-            inputs["style"] = OnnxTensor.createTensor(env, arrayOf(styleRow))
-        }
-        if (inputNames.contains("speed")) {
-            inputs["speed"] = OnnxTensor.createTensor(env, floatArrayOf(1.0f))
-        }
-
-        val result = ortSession.run(inputs)
-        val rawOutput: OnnxTensor? =
-            result.get("audio") as? OnnxTensor
-                ?: result.get("output") as? OnnxTensor
-                ?: result.get(0) as? OnnxTensor
-
-        val outputTensor = rawOutput
-            ?: throw IllegalStateException("No audio output tensor")
-        val floatBuffer = outputTensor.floatBuffer
-        val floats = FloatArray(floatBuffer.remaining())
-        floatBuffer.get(floats)
-
-        val bytes = ByteArray(floats.size * 2)
-        for (i in floats.indices) {
-            val sample = (floats[i] * 32767).toInt().coerceIn(-32678, 32767)
-            bytes[i * 2] = (sample and 0xFF).toByte()
-            bytes[(i * 2) + 1] = ((sample shr 8) and 0xFF).toByte()
-        }
-
-        result.close()
-        return bytes
     }
 
     private fun loadVoiceEmbedding(voiceId: String): Array<FloatArray> {
@@ -119,13 +131,17 @@ class KokoroSession(
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val totalFloats = bytes.size / 4
         // Voice file shape: (-1, 1, 256) — each entry is 256 floats
+        require(bytes.isNotEmpty() && bytes.size % 1024 == 0) { "Invalid voice embedding" }
         val numEntries = totalFloats / 256
         val matrix = Array(numEntries) { FloatArray(256) { buf.float } }
         voiceCache[voiceId] = matrix
         return matrix
     }
 
+    @Synchronized
     fun close() {
+        if (closed) return
+        closed = true
         try {
             session?.close()
         } catch (_: Exception) {}

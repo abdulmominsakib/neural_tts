@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Fix queued runtime cancellation, engine ownership, and load-error propagation.
+- Await playback completion and make native stop responsive during inference.
+- Preserve streaming settings and reject use of closed or competing streams.
+- Fix System TTS initialization and close native/Dart ONNX resources on failure.
+- Repair resumed downloads, atomic voice downloads, and staged linguistic-data extraction.
+- Restore the example manifest, document Android API 24, and add regression tests.
+
 ## 0.4.0
 
 - feat: add phonemization support to TTS engines and implement eSpeak-ng data management and extraction
