@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
+- Add a distributable `neural-tts-usage` agent skill with guidance for setup,
+  model downloads, playback, streaming, phonemization, and LLM output handling.
 - Fix queued runtime cancellation, engine ownership, and load-error propagation.
 - Await playback completion and make native stop responsive during inference.
 - Preserve streaming settings and reject use of closed or competing streams.
